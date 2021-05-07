@@ -508,7 +508,8 @@ class NN_Delay(NN_Dense):
                                             # self.dynamics.Inputset, self.dynamics.Outputset, self.pred)
         
         # Update 0812: Added Timeset to comply with the new test method in parent
-        Timeset = [inp[:,0,-1] for inp in Inputset]
+        Timeset = [np.copy(inp[:,0,-1]) for inp in Inputset] # DO NOT let Timeset be normalized!
+        
         # Update 0810: I believe the steps below could be done by calling the following two lines.
         Inputset = [normalize_frame(inputset, params=self.input_norm_params)[0][:,self.input_mask,:] for inputset in Inputset]
         
@@ -747,20 +748,6 @@ class NN_Cao(NN_FNN):
 
         
         
-# 0831 Try to let NN learn ODE instead
-# This class tries to learn ODE by defining loss as the difference between goal (input) trajectory and
-# the predicted trajectory calculated from its derivative predictions using a solver.
-class NN_ODE_traj(NN_Delay):
-    def __init__(self, dynamics, input_mask, seed=2020, log_dir=None, tensorboard=False,
-                 Nlayer=2, Nneuron=5, learning_rate=0.001, activation='relu', output_activation='none', 
-                 optimizer='adam', opt_args=(), loss='mse', pred=-1, lr_sched=None,
-                 de=3, delay_int=5):
-#         loss = 
-        super().__init__(dynamics, input_mask, seed, log_dir, tensorboard,
-                         Nlayer, Nneuron, learning_rate, activation, output_activation, 
-                         optimizer, opt_args=opt_args, loss=loss, pred=pred, lr_sched=lr_sched, 
-                         de=de, delay_int=delay_int, sym=False)
-        self.no_normalize = True
 
 # This more clever class differentiates the input data first, and then tries to learn the ODE.
 # Note: This class treats trajectory observation as input, and the corresponding state derivatives as output.
@@ -771,25 +758,26 @@ class NN_ODE_diff(NN_Delay):
     def __init__(self, dynamics, input_mask, seed=2020, log_dir=None, tensorboard=False,
                  Nlayer=2, Nneuron=5, learning_rate=0.001, activation='relu', output_activation='none', 
                  optimizer='adam', opt_args=(), loss='mse', pred=-1, lr_sched=None,
-                 de=3, delay_int=5):
+                 de=3, delay_int=5, no_normalize=True):
         super().__init__(dynamics, input_mask, seed, log_dir, tensorboard,
                          Nlayer, Nneuron, learning_rate, activation, output_activation, 
                          optimizer, opt_args=opt_args, loss=loss, pred=0, lr_sched=lr_sched, 
                          de=de, delay_int=delay_int, sym=False)
-        self.no_normalize = True
+        self.no_normalize = no_normalize
     
     # This class's method for taking gradient without ruining the time data.
     # Assumes that data is in the shape of (Nfeatures+1+Ninputs, Nsamples), in the shape of 
-    # [a row of time; trajectory history; input history]
+    # [a row of time; trajectory history; input history].
+    # This method is not used for now...
     def take_deriv_without_time(self, data, time_ind=0, input_ind=-1):
         # https://numpy.org/doc/stable/reference/generated/numpy.delete.html
         return self.dynamics.dynamics( np.delete(np.delete(data, time_ind, axis=0), input_ind, axis=0),
                                                   data[time_ind], data[input_ind] )
-#         return np.vstack( data[time_ind], 
-#                           self.dynamics.dynamics( np.delete(np.delete(data, time_ind, axis=0), input_ind, axis=0),
-#                                                   data[time_ind], data[input_ind] ),
-#                           data[input_ind])
-#                           np.gradient( np.delete(data, time_ind, axis=0), dt, axis=1 ) )
+        # return np.vstack( data[time_ind], 
+        #                   self.dynamics.dynamics( np.delete(np.delete(data, time_ind, axis=0), input_ind, axis=0),
+        #                                           data[time_ind], data[input_ind] ),
+        #                   data[input_ind])
+        #                   np.gradient( np.delete(data, time_ind, axis=0), dt, axis=1 ) )
     
     # Generates time derivative from training trajectory data.
     # Would've been more complicated if we use PDEs...
@@ -863,8 +851,10 @@ class NN_ODE_diff(NN_Delay):
         for i,res in enumerate(test_results[0]):
             # Note that "res" is the framed result of the shape (Nframes, Nfeatures, 1).
             x0 = Inputset[i][self.dynamics.stateind:self.dynamics.inputind,[0]]
-            res_deriv = res.squeeze().reshape(self.dynamics.output_d,-1)
+            res_deriv = res.squeeze().T # DO NOT use reshape!!! It doesn't preserve the spatial relationship
+#             res_deriv = res.squeeze().reshape(self.dynamics.output_d,-1)
             res_output = Inputset[i][self.dynamics.stateind:self.dynamics.inputind, -res_deriv.shape[1]:]
+            timeset = test_results[3][i]
 #             print( res_deriv.shape, res_output.shape, x0.shape )
             # ref: https://docs.scipy.org/doc/scipy/reference/generated/scipy.integrate.cumtrapz.html
             # If you want to check that integration is working, uncomment the line below the following line.
@@ -872,7 +862,7 @@ class NN_ODE_diff(NN_Delay):
 #             traj_result = integrate.cumtrapz( 
 #                 test_results[1][i].squeeze().reshape(self.dynamics.output_d,-1), 
 #                 x=Inputset[i][0,-res_deriv.shape[1]:], axis=1 ) + x0
-            print(res_deriv, Inputset[i][0,-res_deriv.shape[1]:])
+#             print(res_deriv, Inputset[i][0,-res_deriv.shape[1]:])
             traj_result = np.hstack((x0, traj_result))
             integrate_results.append(traj_result)
             correct_results.append(res_output)
@@ -880,267 +870,300 @@ class NN_ODE_diff(NN_Delay):
             
         # return: 1) traditional test return package, 2) trajectory based on prediction, 3) real trajectory info
         return test_results, integrate_results, correct_results
+"""
+for:
+    # # Checkpoint
+    # 0831 Try to let NN learn ODE instead
+    # This class tries to learn ODE by defining loss as the difference between goal (input) trajectory and
+    # the predicted trajectory calculated from its derivative predictions using a solver.
+    # 0917 Decided to do this in a separate file
+    # class NN_ODE_traj(NN_Delay):
+    #     def __init__(self, dynamics, input_mask, seed=2020, log_dir=None, tensorboard=False,
+    #                  Nlayer=2, Nneuron=5, learning_rate=0.001, activation='relu', output_activation='none', 
+    #                  optimizer='adam', opt_args=(), loss='mse', pred=-1, lr_sched=None,
+    #                  de=3, delay_int=5, no_normalize=True):
+    #         # Define customized loss function.
+    #         # Requirements: Input has 2 arguments - actual value and model prediction - of the type "tensor"; Output is scalar.
+    #         # The actual value one should be a frame of the overall output dataset, so its shape would be (Nfeatures, 1) in other NN classes. 
+    #         # Here, however, we would want to define the loss as the difference between trajectories. In addition, we would prefer to have
+    #         # a longer trajectory available, where we could take long-term accumulated errors into account during training. 
+    #         # This leads us to some dilemma. On one hand, we don't want to regenerate the true trajectory from true derivatives (because
+    #         # this induces error, while generating derivatives from trajectory can be done without error using the dynamics ODEs), and we 
+    #         # want to reduce long-term accumulated errors, so we would want to take in longer arguments. On the other hand, we usually
+    #         # just generate predictions on one timestep, and it would be weird to make predictions for an entire segment of time. We have
+    #         # a design choice to make... 
+    #         # Let's try the following for now, and see what happens:
+    #         # 1. Take in the "actual value" as the Inputset (including time and input), but "model prediction" as dynamics derivatives.
+    #         # 2. Use the time and input from the "actual value" to approximate trajectory from "model prediction".
+    #         # 3. Find the SoS between real trajectory (excluding time and input) and appoximated trajectory.
+    #         def loss(Inputset, traj_pred):
+    #             timeset = 
 
-# # Checkpoint
 
-# # This class tries to learn ODE by defining loss as the difference between goal (input) trajectory and
-# # the predicted trajectory calculated from its derivative predictions using a solver.
-# class NN_ODE_traj(NN_Delay):
-#     def __init__(self, dynamics, input_mask, seed=2020, log_dir=None, tensorboard=False,
-#                  Nlayer=2, Nneuron=5, learning_rate=0.001, activation='relu', output_activation='none', 
-#                  optimizer='adam', opt_args=(), loss='mse', pred=-1, lr_sched=None,
-#                  de=3, delay_int=5):
-# #         loss = 
-#         super().__init__(dynamics, input_mask, seed, log_dir, tensorboard,
-#                          Nlayer, Nneuron, learning_rate, activation, output_activation, 
-#                          optimizer, opt_args=opt_args, loss=loss, pred=pred, lr_sched=lr_sched, 
-#                          de=de, delay_int=delay_int, sym=False)
+    #         super().__init__(dynamics, input_mask, seed, log_dir, tensorboard,
+    #                          Nlayer, Nneuron, learning_rate, activation, output_activation, 
+    #                          optimizer, opt_args=opt_args, loss=loss, pred=pred, lr_sched=lr_sched, 
+    #                          de=de, delay_int=delay_int, sym=False)
+    #         self.no_normalize = no_normalize
 
-# # This more clever class differentiates the input data first, and then tries to learn the ODE.
-# # Note: This class treats trajectory observation as input, and the corresponding state derivatives as output.
-# #       I.e. This class doesn't treat treating output as a function of the states. Its Outputset would always
-# #            be the derivatives of the entire Inputset. If you give it a dynamics system where the Outputset
-# #            isn't the same as Inputset, then unexpected behavior could happen...? Maybe. 
-# class NN_ODE_diff(NN_Delay):
-#     def __init__(self, dynamics, input_mask, seed=2020, log_dir=None, tensorboard=False,
-#                  Nlayer=2, Nneuron=5, learning_rate=0.001, activation='relu', output_activation='none', 
-#                  optimizer='adam', opt_args=(), loss='mse', pred=-1, lr_sched=None,
-#                  de=3, delay_int=5):
-#         super().__init__(dynamics, input_mask, seed, log_dir, tensorboard,
-#                          Nlayer, Nneuron, learning_rate, activation, output_activation, 
-#                          optimizer, opt_args=opt_args, loss=loss, pred=0, lr_sched=lr_sched, 
-#                          de=de, delay_int=delay_int, sym=False)
-    
-#     # This class's method for taking gradient without ruining the time data.
-#     # Assumes that data is in the shape of (Nfeatures+1+Ninputs, Nsamples), in the shape of 
-#     # [a row of time; trajectory history; input history]
-#     def take_deriv_without_time(self, data, time_ind=0, input_ind=-1):
-#         # https://numpy.org/doc/stable/reference/generated/numpy.delete.html
-#         return self.dynamics.dynamics( np.delete(np.delete(data, time_ind, axis=0), input_ind, axis=0),
-#                                                   data[time_ind], data[input_ind] )
-# #         return np.vstack( data[time_ind], 
-# #                           self.dynamics.dynamics( np.delete(np.delete(data, time_ind, axis=0), input_ind, axis=0),
-# #                                                   data[time_ind], data[input_ind] ),
-# #                           data[input_ind])
-# #                           np.gradient( np.delete(data, time_ind, axis=0), dt, axis=1 ) )
-    
-#     # Generates time derivative from training trajectory data.
-#     # Would've been more complicated if we use PDEs...
-#     # input is trajectory. Output is trajectory's correct derivatives
-#     def train_data_generation_helper(self, inds=[]):
-        
-#         if self.frame_size_changed:
-# #             input_deriv = [self.take_deriv_without_time(inp, 
-# #                                        self.dynamics.dt, # Spacing between data points. Uniform for now.
-# #                                        time_ind=0
-# #                                        #axis=1 # Axis 0 are the different variables. Axis 1 is over time.
-# #                                       ) for inp in self.dynamics.Inputset]
-# #             output_deriv = [self.take_deriv_without_time(oup, self.dynamics.dt, 0) for oup in self.dynamics.Outputset]
-# #             output_deriv = []
-# #             for i,inp in self.dynamics.Inputset:
-# #                 # Use the dynamics method inside to find the true dynamics as the Outputset.
-# #                 # inp[1:-1] is the full state, inp[0] is time, inp[-1] is input u.
-# #                 output_deriv.append( self.dynamics.dynamics(inp[1:-1], inp[0], inp[-1]) )
-#             output_deriv = [self.take_deriv_without_time(inp) for inp in self.dynamics.Inputset]
-            
-#             # Store this stuff inside to avoid potential repeated calculation
-#             self.output_deriv = output_deriv
-# #             self.input_deriv, self.output_deriv = (input_deriv, output_deriv)
-            
-#             # Assume there's no prediction task in this case, so pred = 0
-#             (self.Inputset, self.Outputset) = delay_embed(
-#                   self.delay_int, self.de, self.dynamics.Inputset, output_deriv, 0, symmetric=self.sym)
-# #                 self.delay_int, self.de, input_deriv, output_deriv, 0, symmetric=self.sym)
-#             self.frame_size_changed = False
-        
-#         # Call the parent method. Because we don't have any active flags, the parent method won't do
-#         # anything extra before finally calling the matriarch's generation method.
-#         return super().train_data_generation_helper(inds=inds)
-    
-#     # To test, we also want to output the trajectory calculated from prediction.
-#     # Note: If Inputset and Outputset are custom arguments, then make sure they comply with the input mask thing.
-#     #       This method would assume that Inputset is trajectory.
-#     # Outputset is not needed in this method, because it would be calculated from Inputset (full trajectory inluding t and u).
-#     def test(self, Inputset=None, dt=0, inds=[], squeeze=True):
-#         if dt <= 0:
-#             dt = self.dynamics.dt
-        
-#         if Inputset is not None:
-#             # Take the gradient and put them into parent call, assuming the inputsets are of the expected shape
-# #             input_deriv = [self.take_deriv_without_time(inp, dt, 0) for inp in Inputset]
-# #             output_deriv = [self.take_deriv_without_time(oup, dt, 0) for oup in Outputset]
-#             output_deriv = [self.take_deriv_without_time(inp) for inp in Inputset]
-#         elif len(inds) > 0:
-# #             input_deriv = [self.input_deriv[i] for i in inds]
-#             Inputset = [self.dynamics.Inputset[i] for i in inds]
-#             output_deriv = [self.output_deriv[i] for i in inds]
-#         else:
-#             Inputset = self.dynamics.Inputset #self.input_deriv
-#             output_deriv = self.output_deriv
-            
-#         # The parent method would: 1) Delay embed the provided Inputset and Outputset;
-#         # 2) Obtain Timeset, normalize the Inputset, and apply input_mask;
-#         # 3) Call the matriach method, where it would run the prediction, de-normalize result, squeeze, and return.
-#         test_results = super().test(Inputset, output_deriv, inds=[], squeeze=squeeze)
-#         # Note that Inputset in this scope is the full state trajectory with time and input history.
-#         # The Inputset in test_results is the masked / stripped down version with only the observed states' history. 
-#         # The prediction that happened in the parent call is based on the masked Inputset, not the full state one.
-        
-#         # Then we run odeint on the returned result and see what happens.
-#         # To translate the code below: We 
-#         # 1) Find x0 by referring to the first column of test data
-#         # 2) Use cumsum() or similar integration methods to approximate integration 
-#         ### TODO: Find a better / more accurate way to integrate
-#         integrate_results = []
-#         correct_results = [] # Stores correct trajectory; time step matches the ones in integrate_results.
-#         for i,res in enumerate(test_results[0]):
-#             # Note that "res" is the framed result of the shape (Nframes, Nfeatures, 1).
-#             x0 = Inputset[i][self.dynamics.stateind:self.dynamics.inputind,[0]]
-#             res_deriv = res.squeeze().reshape(self.dynamics.output_d,-1)
-#             res_output = Inputset[i][self.dynamics.stateind:self.dynamics.inputind, -res_deriv.shape[1]:]
-# #             print( res_deriv.shape, res_output.shape, x0.shape )
-#             # ref: https://docs.scipy.org/doc/scipy/reference/generated/scipy.integrate.cumtrapz.html
-#             traj_result = integrate.cumtrapz( res_deriv, x=Inputset[i][0,-res_deriv.shape[1]:], axis=1 ) + x0
-#             traj_result = np.hstack((x0, traj_result))
-#             integrate_results.append(traj_result)
-#             correct_results.append(res_output)
-# #             x0 = res[2][0,:,0] # The first col (:,0) of the first frame (0) of Inputset (2)
-            
-#         # return: 1) traditional test return package, 2) trajectory based on prediction, 3) real trajectory info
-#         return test_results, integrate_results, correct_results
 
-# Subclass for delay embedding with nonuniform delays identified by False Nearest Neighbor methods
-# class NN_Garcia(NN_FNN):
-#     def __init__(self, dynamics, input_mask, ratio=10, stop_threshold=0, max_tau=20, max_de=10, verbose=False, fnn_ind=0, 
-#                  inverse=True, local_max=True, twoD=False,
-#                  seed=2020, log_dir=None, tensorboard=False,
-#                  Nlayer=2, Nneuron=5, learning_rate=0.001, activation='relu', output_activation='none', optimizer='adam'):
-#         self.inverse=inverse
-#         self.local_max=local_max
-#         self.twoD=twoD
-#         super().__init__(dynamics, input_mask, ratio, stop_threshold, max_tau, max_de, verbose, fnn_ind, 
-#                         seed, log_dir, tensorboard, Nlayer, Nneuron, learning_rate, activation, output_activation, optimizer)
-    
-#     def find_de_via_fnn(self, fnn_ind=0):
-#         js, ts, args = find_delay_by_FNN_Garcia(self.dynamics.Inputset[fnn_ind][self.input_mask,:], 
-#                                         ratio=self.ratio, pred=self.dynamics.pred, stop_threshold=self.stop_threshold, 
-#                                         min_tau=1, max_tau=self.max_tau, max_dim=self.max_dim, 
-#                                         init_i=0, end_early=True, verbose=self.verbose, 
-#                                         inverse=self.inverse, local_max=self.local_max, twoD=self.twoD)
-#         tts = np.cumsum(ts) # Cumulative delay values
-#         return js, tts, args
-    
-#     def delay_embed_fnn(self, inputsets):
-#         return delay_embed_Garcia(self.js, self.tts, 
-#                                   inputsets, self.dynamics.Outputset, self.dynamics.pred, Timeset=self.dynamics.Timeset)
+    # # This class tries to learn ODE by defining loss as the difference between goal (input) trajectory and
+    # # the predicted trajectory calculated from its derivative predictions using a solver.
+    # class NN_ODE_traj(NN_Delay):
+    #     def __init__(self, dynamics, input_mask, seed=2020, log_dir=None, tensorboard=False,
+    #                  Nlayer=2, Nneuron=5, learning_rate=0.001, activation='relu', output_activation='none', 
+    #                  optimizer='adam', opt_args=(), loss='mse', pred=-1, lr_sched=None,
+    #                  de=3, delay_int=5):
+    # #         loss = 
+    #         super().__init__(dynamics, input_mask, seed, log_dir, tensorboard,
+    #                          Nlayer, Nneuron, learning_rate, activation, output_activation, 
+    #                          optimizer, opt_args=opt_args, loss=loss, pred=pred, lr_sched=lr_sched, 
+    #                          de=de, delay_int=delay_int, sym=False)
 
-# class NN_Cao(NN_FNN):
-#     def __init__(self, dynamics, input_mask, max_tau=20, max_de=10, verbose=False, fnn_ind=0, 
-#                  seed=2020, log_dir=None, tensorboard=False,
-#                  Nlayer=2, Nneuron=5, learning_rate=0.001, activation='relu', output_activation='none', optimizer='adam'):
-#         super().__init__(dynamics, input_mask, 10, 0, max_tau, max_de, verbose, fnn_ind, seed, log_dir, tensorboard, 
-#                          Nlayer, Nneuron, learning_rate, activation, output_activation, optimizer)
-    
-#     def find_de_via_fnn(self, fnn_ind=0):
-#         js, ttau, args = find_delay_by_FNN_Cao(self.dynamics.Inputset[fnn_ind][self.input_mask,:], 
-#                                      pred=self.dynamics.pred, min_tau=1, max_tau=self.max_tau, max_dim=self.max_dim, 
-#                                      init_i=0, end_early=True, verbose=self.verbose)
-#         # Return ttau[1:], because the method includes an extra 0 at the start of it.
-#         return js, ttau[1:], args
-    
-#     def delay_embed_fnn(self, inputsets):
-#         return delay_embed_Cao(self.FNNargs, 
-#                                   inputsets, self.dynamics.Outputset, self.dynamics.pred, Timeset=self.dynamics.Timeset)
-    
-    
-# # Subclass for delay embedding with nonuniform delays identified by False Nearest Neighbor methods
-# class NN_Garcia(NN_Dense):
-#     def __init__(self, dynamics, input_mask, ratio=10, stop_threshold=0, max_tau=20, max_de=10, verbose=False, fnn_ind=0, 
-#                  seed=2020, log_dir=None, tensorboard=False,
-#                  Nlayer=2, Nneuron=5, learning_rate=0.001, activation='relu', output_activation='none', optimizer='adam'):
-#         self.verbose=verbose
-#         # It is assumed that the dynamics object comes with its own data already generated.
-#         # Also assumes that the first dataset in Inputset is all the data we would use for finding the embedding.
-#         # Also assumes that the hyperparameters are given, supervised.
-#         self.ratio = ratio
-#         self.stop_threshold = stop_threshold
-#         self.max_tau = max_tau
-#         self.max_dim = max_de
-        
-#         if len(input_mask) <= 0:
-#             input_mask = [i+1 for i in range(dynamics.d)] # Because the first row of Inputset is always time
-#         self.input_mask = input_mask
-#         self.dynamics = dynamics
-#         (self.js, self.ts, self.Fs) = self.find_de_via_fnn(fnn_ind)
-#         self.tts = np.cumsum(self.ts) # Cumulative delay values
-#         self.de = len(self.js) + len(input_mask)
-#         # Below I'll hack the meaning of "input_mask"...
-#         # You see, in the parent class, the length of "input_mask" is directly tied to the neural net input shape.
-#         # The shape was seen as (len(input_mask),self.de) in that implementation, because it's expecting
-#         # uniform delay for all the observation variables, and input_mask indicates which variables are observed.
-#         # Here, the meaning of input dimension has significantly changed... Our input is now of the shape 
-#         # (Nfeatures+len(js), 1), as indicated by the Garcia paper. 
-#         # Because all other uses of "input_mask" was overwritten by the methods below, we can safely hack it.
-#         input_mask_fake = [i for i in range(self.de)]
-#         super().__init__(dynamics, input_mask_fake, seed, log_dir, tensorboard,
-#                  Nlayer, Nneuron, learning_rate, activation, output_activation, optimizer, frame_size=1)
-#         # Its super calculates the shapes for inputs and outputs of the network, and nothing else.
-#         # Rectify the mistaken input mask here
-#         self.input_mask = input_mask
-    
-#     def find_de_via_fnn(self, fnn_ind=0):
-#         return find_delay_by_FNN_Garcia(self.dynamics.Inputset[fnn_ind][self.input_mask,:], 
-#                                         ratio=self.ratio, pred=self.dynamics.pred, stop_threshold=self.stop_threshold, 
-#                                         min_tau=1, max_tau=self.max_tau, max_dim=self.max_dim, 
-#                                         init_i=0, end_early=True, verbose=self.verbose)
-    
-#     # Modified the original data geneation method, but not changing its structure by too much.
-#     # This in turn modifies the training procedure, because self.train() calls this method in its beginning.
-#     # Helper method to gather data and make them into framed training data.
-#     # Notice that, UNLIKE other helper methods, this one has to do the input masking earlier.
-#     def train_data_generation_helper(self, inds=[]):
-#         if self.frame_size_changed:
-#             inputsets = [inputset[self.input_mask,:] for inputset in self.dynamics.Inputset]
-#             (self.Inputset, self.Outputset, self.TrainingTimeset) = delay_embed_Garcia(
-#                     self.js, self.tts, inputsets, self.dynamics.Outputset, self.dynamics.pred, Timeset=self.dynamics.Timeset)
-#             self.frame_size_changed = False
-#         # Train the model and keep track of history
-#         if len(inds) <= 0:
-#             Inputset = self.Inputset
-#             Outputset = self.Outputset
-#         else:
-#             (Inputset, Outputset) = ( [self.Inputset[i] for i in inds], [self.Outputset[i] for i in inds] )
-#         # Put all data into one array, so that it could train
-#         Inputset = np.concatenate(Inputset)
-#         Outputset = np.concatenate(Outputset)
-# #         if self.verbose:
-# #             print('Inputset size = {0}; outputset size = {1}'.format(Inputset.shape, Outputset.shape))
-#         # Mask input data that should remain unseen
-# #         if len(self.input_mask) > 0:
-# #             Inputset = Inputset[:,self.input_mask,:]
-#         return (Inputset, Outputset)
-    
-#     # Modify the original test method, because we need to embed the input data...
-#     # __I changed the embedding method and this method to allow it to return time data in frames__
-#     # __Also because Garcia FNN has a different embedding__
-#     def test(self, inds=[], squeeze=True):
-#         inputsets = [inputset[self.input_mask,:] for inputset in self.dynamics.Inputset]
-#         (Inputset, Outputset, Timeset) = delay_embed_Garcia(
-#                     self.js, self.tts, inputsets, self.dynamics.Outputset, self.dynamics.pred, Timeset=self.dynamics.Timeset)
-#         results = [self.model.predict(inputset) for inputset in Inputset]
-        
-#         # Squeezing reduces unnecessary dimensions.
-#         if squeeze:
-#             results = [np.squeeze(result) for result in results]
-#             Outputset = [np.squeeze(result) for result in Outputset]
-#             Timeset = [np.squeeze(result) for result in Timeset]
-        
-#         if self.verbose:
-#             print('Dimensions: Outputset = {0}, results = {1}'.format(Outputset[0].shape, results[0].shape))
-#         return results, Outputset, Inputset, Timeset
-     
-#     # Because delay embedding dimension is directly tied with the frame_size field in parent class,
-#     # disable the original method that could arbitrarily set it. 
-#     def set_frame_size(self, frame_size):
-#         pass
-    
+    # # This more clever class differentiates the input data first, and then tries to learn the ODE.
+    # # Note: This class treats trajectory observation as input, and the corresponding state derivatives as output.
+    # #       I.e. This class doesn't treat treating output as a function of the states. Its Outputset would always
+    # #            be the derivatives of the entire Inputset. If you give it a dynamics system where the Outputset
+    # #            isn't the same as Inputset, then unexpected behavior could happen...? Maybe. 
+    # class NN_ODE_diff(NN_Delay):
+    #     def __init__(self, dynamics, input_mask, seed=2020, log_dir=None, tensorboard=False,
+    #                  Nlayer=2, Nneuron=5, learning_rate=0.001, activation='relu', output_activation='none', 
+    #                  optimizer='adam', opt_args=(), loss='mse', pred=-1, lr_sched=None,
+    #                  de=3, delay_int=5):
+    #         super().__init__(dynamics, input_mask, seed, log_dir, tensorboard,
+    #                          Nlayer, Nneuron, learning_rate, activation, output_activation, 
+    #                          optimizer, opt_args=opt_args, loss=loss, pred=0, lr_sched=lr_sched, 
+    #                          de=de, delay_int=delay_int, sym=False)
+
+    #     # This class's method for taking gradient without ruining the time data.
+    #     # Assumes that data is in the shape of (Nfeatures+1+Ninputs, Nsamples), in the shape of 
+    #     # [a row of time; trajectory history; input history]
+    #     def take_deriv_without_time(self, data, time_ind=0, input_ind=-1):
+    #         # https://numpy.org/doc/stable/reference/generated/numpy.delete.html
+    #         return self.dynamics.dynamics( np.delete(np.delete(data, time_ind, axis=0), input_ind, axis=0),
+    #                                                   data[time_ind], data[input_ind] )
+    # #         return np.vstack( data[time_ind], 
+    # #                           self.dynamics.dynamics( np.delete(np.delete(data, time_ind, axis=0), input_ind, axis=0),
+    # #                                                   data[time_ind], data[input_ind] ),
+    # #                           data[input_ind])
+    # #                           np.gradient( np.delete(data, time_ind, axis=0), dt, axis=1 ) )
+
+    #     # Generates time derivative from training trajectory data.
+    #     # Would've been more complicated if we use PDEs...
+    #     # input is trajectory. Output is trajectory's correct derivatives
+    #     def train_data_generation_helper(self, inds=[]):
+
+    #         if self.frame_size_changed:
+    # #             input_deriv = [self.take_deriv_without_time(inp, 
+    # #                                        self.dynamics.dt, # Spacing between data points. Uniform for now.
+    # #                                        time_ind=0
+    # #                                        #axis=1 # Axis 0 are the different variables. Axis 1 is over time.
+    # #                                       ) for inp in self.dynamics.Inputset]
+    # #             output_deriv = [self.take_deriv_without_time(oup, self.dynamics.dt, 0) for oup in self.dynamics.Outputset]
+    # #             output_deriv = []
+    # #             for i,inp in self.dynamics.Inputset:
+    # #                 # Use the dynamics method inside to find the true dynamics as the Outputset.
+    # #                 # inp[1:-1] is the full state, inp[0] is time, inp[-1] is input u.
+    # #                 output_deriv.append( self.dynamics.dynamics(inp[1:-1], inp[0], inp[-1]) )
+    #             output_deriv = [self.take_deriv_without_time(inp) for inp in self.dynamics.Inputset]
+
+    #             # Store this stuff inside to avoid potential repeated calculation
+    #             self.output_deriv = output_deriv
+    # #             self.input_deriv, self.output_deriv = (input_deriv, output_deriv)
+
+    #             # Assume there's no prediction task in this case, so pred = 0
+    #             (self.Inputset, self.Outputset) = delay_embed(
+    #                   self.delay_int, self.de, self.dynamics.Inputset, output_deriv, 0, symmetric=self.sym)
+    # #                 self.delay_int, self.de, input_deriv, output_deriv, 0, symmetric=self.sym)
+    #             self.frame_size_changed = False
+
+    #         # Call the parent method. Because we don't have any active flags, the parent method won't do
+    #         # anything extra before finally calling the matriarch's generation method.
+    #         return super().train_data_generation_helper(inds=inds)
+
+    #     # To test, we also want to output the trajectory calculated from prediction.
+    #     # Note: If Inputset and Outputset are custom arguments, then make sure they comply with the input mask thing.
+    #     #       This method would assume that Inputset is trajectory.
+    #     # Outputset is not needed in this method, because it would be calculated from Inputset (full trajectory inluding t and u).
+    #     def test(self, Inputset=None, dt=0, inds=[], squeeze=True):
+    #         if dt <= 0:
+    #             dt = self.dynamics.dt
+
+    #         if Inputset is not None:
+    #             # Take the gradient and put them into parent call, assuming the inputsets are of the expected shape
+    # #             input_deriv = [self.take_deriv_without_time(inp, dt, 0) for inp in Inputset]
+    # #             output_deriv = [self.take_deriv_without_time(oup, dt, 0) for oup in Outputset]
+    #             output_deriv = [self.take_deriv_without_time(inp) for inp in Inputset]
+    #         elif len(inds) > 0:
+    # #             input_deriv = [self.input_deriv[i] for i in inds]
+    #             Inputset = [self.dynamics.Inputset[i] for i in inds]
+    #             output_deriv = [self.output_deriv[i] for i in inds]
+    #         else:
+    #             Inputset = self.dynamics.Inputset #self.input_deriv
+    #             output_deriv = self.output_deriv
+
+    #         # The parent method would: 1) Delay embed the provided Inputset and Outputset;
+    #         # 2) Obtain Timeset, normalize the Inputset, and apply input_mask;
+    #         # 3) Call the matriach method, where it would run the prediction, de-normalize result, squeeze, and return.
+    #         test_results = super().test(Inputset, output_deriv, inds=[], squeeze=squeeze)
+    #         # Note that Inputset in this scope is the full state trajectory with time and input history.
+    #         # The Inputset in test_results is the masked / stripped down version with only the observed states' history. 
+    #         # The prediction that happened in the parent call is based on the masked Inputset, not the full state one.
+
+    #         # Then we run odeint on the returned result and see what happens.
+    #         # To translate the code below: We 
+    #         # 1) Find x0 by referring to the first column of test data
+    #         # 2) Use cumsum() or similar integration methods to approximate integration 
+    #         ### TODO: Find a better / more accurate way to integrate
+    #         integrate_results = []
+    #         correct_results = [] # Stores correct trajectory; time step matches the ones in integrate_results.
+    #         for i,res in enumerate(test_results[0]):
+    #             # Note that "res" is the framed result of the shape (Nframes, Nfeatures, 1).
+    #             x0 = Inputset[i][self.dynamics.stateind:self.dynamics.inputind,[0]]
+    #             res_deriv = res.squeeze().reshape(self.dynamics.output_d,-1)
+    #             res_output = Inputset[i][self.dynamics.stateind:self.dynamics.inputind, -res_deriv.shape[1]:]
+    # #             print( res_deriv.shape, res_output.shape, x0.shape )
+    #             # ref: https://docs.scipy.org/doc/scipy/reference/generated/scipy.integrate.cumtrapz.html
+    #             traj_result = integrate.cumtrapz( res_deriv, x=Inputset[i][0,-res_deriv.shape[1]:], axis=1 ) + x0
+    #             traj_result = np.hstack((x0, traj_result))
+    #             integrate_results.append(traj_result)
+    #             correct_results.append(res_output)
+    # #             x0 = res[2][0,:,0] # The first col (:,0) of the first frame (0) of Inputset (2)
+
+    #         # return: 1) traditional test return package, 2) trajectory based on prediction, 3) real trajectory info
+    #         return test_results, integrate_results, correct_results
+
+    # Subclass for delay embedding with nonuniform delays identified by False Nearest Neighbor methods
+    # class NN_Garcia(NN_FNN):
+    #     def __init__(self, dynamics, input_mask, ratio=10, stop_threshold=0, max_tau=20, max_de=10, verbose=False, fnn_ind=0, 
+    #                  inverse=True, local_max=True, twoD=False,
+    #                  seed=2020, log_dir=None, tensorboard=False,
+    #                  Nlayer=2, Nneuron=5, learning_rate=0.001, activation='relu', output_activation='none', optimizer='adam'):
+    #         self.inverse=inverse
+    #         self.local_max=local_max
+    #         self.twoD=twoD
+    #         super().__init__(dynamics, input_mask, ratio, stop_threshold, max_tau, max_de, verbose, fnn_ind, 
+    #                         seed, log_dir, tensorboard, Nlayer, Nneuron, learning_rate, activation, output_activation, optimizer)
+
+    #     def find_de_via_fnn(self, fnn_ind=0):
+    #         js, ts, args = find_delay_by_FNN_Garcia(self.dynamics.Inputset[fnn_ind][self.input_mask,:], 
+    #                                         ratio=self.ratio, pred=self.dynamics.pred, stop_threshold=self.stop_threshold, 
+    #                                         min_tau=1, max_tau=self.max_tau, max_dim=self.max_dim, 
+    #                                         init_i=0, end_early=True, verbose=self.verbose, 
+    #                                         inverse=self.inverse, local_max=self.local_max, twoD=self.twoD)
+    #         tts = np.cumsum(ts) # Cumulative delay values
+    #         return js, tts, args
+
+    #     def delay_embed_fnn(self, inputsets):
+    #         return delay_embed_Garcia(self.js, self.tts, 
+    #                                   inputsets, self.dynamics.Outputset, self.dynamics.pred, Timeset=self.dynamics.Timeset)
+
+    # class NN_Cao(NN_FNN):
+    #     def __init__(self, dynamics, input_mask, max_tau=20, max_de=10, verbose=False, fnn_ind=0, 
+    #                  seed=2020, log_dir=None, tensorboard=False,
+    #                  Nlayer=2, Nneuron=5, learning_rate=0.001, activation='relu', output_activation='none', optimizer='adam'):
+    #         super().__init__(dynamics, input_mask, 10, 0, max_tau, max_de, verbose, fnn_ind, seed, log_dir, tensorboard, 
+    #                          Nlayer, Nneuron, learning_rate, activation, output_activation, optimizer)
+
+    #     def find_de_via_fnn(self, fnn_ind=0):
+    #         js, ttau, args = find_delay_by_FNN_Cao(self.dynamics.Inputset[fnn_ind][self.input_mask,:], 
+    #                                      pred=self.dynamics.pred, min_tau=1, max_tau=self.max_tau, max_dim=self.max_dim, 
+    #                                      init_i=0, end_early=True, verbose=self.verbose)
+    #         # Return ttau[1:], because the method includes an extra 0 at the start of it.
+    #         return js, ttau[1:], args
+
+    #     def delay_embed_fnn(self, inputsets):
+    #         return delay_embed_Cao(self.FNNargs, 
+    #                                   inputsets, self.dynamics.Outputset, self.dynamics.pred, Timeset=self.dynamics.Timeset)
+
+
+    # # Subclass for delay embedding with nonuniform delays identified by False Nearest Neighbor methods
+    # class NN_Garcia(NN_Dense):
+    #     def __init__(self, dynamics, input_mask, ratio=10, stop_threshold=0, max_tau=20, max_de=10, verbose=False, fnn_ind=0, 
+    #                  seed=2020, log_dir=None, tensorboard=False,
+    #                  Nlayer=2, Nneuron=5, learning_rate=0.001, activation='relu', output_activation='none', optimizer='adam'):
+    #         self.verbose=verbose
+    #         # It is assumed that the dynamics object comes with its own data already generated.
+    #         # Also assumes that the first dataset in Inputset is all the data we would use for finding the embedding.
+    #         # Also assumes that the hyperparameters are given, supervised.
+    #         self.ratio = ratio
+    #         self.stop_threshold = stop_threshold
+    #         self.max_tau = max_tau
+    #         self.max_dim = max_de
+
+    #         if len(input_mask) <= 0:
+    #             input_mask = [i+1 for i in range(dynamics.d)] # Because the first row of Inputset is always time
+    #         self.input_mask = input_mask
+    #         self.dynamics = dynamics
+    #         (self.js, self.ts, self.Fs) = self.find_de_via_fnn(fnn_ind)
+    #         self.tts = np.cumsum(self.ts) # Cumulative delay values
+    #         self.de = len(self.js) + len(input_mask)
+    #         # Below I'll hack the meaning of "input_mask"...
+    #         # You see, in the parent class, the length of "input_mask" is directly tied to the neural net input shape.
+    #         # The shape was seen as (len(input_mask),self.de) in that implementation, because it's expecting
+    #         # uniform delay for all the observation variables, and input_mask indicates which variables are observed.
+    #         # Here, the meaning of input dimension has significantly changed... Our input is now of the shape 
+    #         # (Nfeatures+len(js), 1), as indicated by the Garcia paper. 
+    #         # Because all other uses of "input_mask" was overwritten by the methods below, we can safely hack it.
+    #         input_mask_fake = [i for i in range(self.de)]
+    #         super().__init__(dynamics, input_mask_fake, seed, log_dir, tensorboard,
+    #                  Nlayer, Nneuron, learning_rate, activation, output_activation, optimizer, frame_size=1)
+    #         # Its super calculates the shapes for inputs and outputs of the network, and nothing else.
+    #         # Rectify the mistaken input mask here
+    #         self.input_mask = input_mask
+
+    #     def find_de_via_fnn(self, fnn_ind=0):
+    #         return find_delay_by_FNN_Garcia(self.dynamics.Inputset[fnn_ind][self.input_mask,:], 
+    #                                         ratio=self.ratio, pred=self.dynamics.pred, stop_threshold=self.stop_threshold, 
+    #                                         min_tau=1, max_tau=self.max_tau, max_dim=self.max_dim, 
+    #                                         init_i=0, end_early=True, verbose=self.verbose)
+
+    #     # Modified the original data geneation method, but not changing its structure by too much.
+    #     # This in turn modifies the training procedure, because self.train() calls this method in its beginning.
+    #     # Helper method to gather data and make them into framed training data.
+    #     # Notice that, UNLIKE other helper methods, this one has to do the input masking earlier.
+    #     def train_data_generation_helper(self, inds=[]):
+    #         if self.frame_size_changed:
+    #             inputsets = [inputset[self.input_mask,:] for inputset in self.dynamics.Inputset]
+    #             (self.Inputset, self.Outputset, self.TrainingTimeset) = delay_embed_Garcia(
+    #                     self.js, self.tts, inputsets, self.dynamics.Outputset, self.dynamics.pred, Timeset=self.dynamics.Timeset)
+    #             self.frame_size_changed = False
+    #         # Train the model and keep track of history
+    #         if len(inds) <= 0:
+    #             Inputset = self.Inputset
+    #             Outputset = self.Outputset
+    #         else:
+    #             (Inputset, Outputset) = ( [self.Inputset[i] for i in inds], [self.Outputset[i] for i in inds] )
+    #         # Put all data into one array, so that it could train
+    #         Inputset = np.concatenate(Inputset)
+    #         Outputset = np.concatenate(Outputset)
+    # #         if self.verbose:
+    # #             print('Inputset size = {0}; outputset size = {1}'.format(Inputset.shape, Outputset.shape))
+    #         # Mask input data that should remain unseen
+    # #         if len(self.input_mask) > 0:
+    # #             Inputset = Inputset[:,self.input_mask,:]
+    #         return (Inputset, Outputset)
+    #     # Modify the original test method, because we need to embed the input data...
+    #     # __I changed the embedding method and this method to allow it to return time data in frames__
+    #     # __Also because Garcia FNN has a different embedding__
+    #     def test(self, inds=[], squeeze=True):
+    #         inputsets = [inputset[self.input_mask,:] for inputset in self.dynamics.Inputset]
+    #         (Inputset, Outputset, Timeset) = delay_embed_Garcia(
+    #                     self.js, self.tts, inputsets, self.dynamics.Outputset, self.dynamics.pred, Timeset=self.dynamics.Timeset)
+    #         results = [self.model.predict(inputset) for inputset in Inputset]
+
+    #         # Squeezing reduces unnecessary dimensions.
+    #         if squeeze:
+    #             results = [np.squeeze(result) for result in results]
+    #             Outputset = [np.squeeze(result) for result in Outputset]
+    #             Timeset = [np.squeeze(result) for result in Timeset]
+
+    #         if self.verbose:
+    #             print('Dimensions: Outputset = {0}, results = {1}'.format(Outputset[0].shape, results[0].shape))
+    #         return results, Outputset, Inputset, Timeset
+
+    #     # Because delay embedding dimension is directly tied with the frame_size field in parent class,
+    #     # disable the original method that could arbitrarily set it. 
+    #     def set_frame_size(self, frame_size):
+    #         pass
+    """    

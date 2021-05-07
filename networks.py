@@ -251,7 +251,7 @@ class NN():
                                         params=self.input_norm_params,
                                         no_normalize=self.no_normalize)[0][:,self.input_mask,:] for inputset in Inputset]
 #         print(Timeset, Timeset[0].shape, Inputset[0].shape)
-        
+
         # Do prediction and de-normalize the prediction result
         results = [normalize_frame(self.model.predict(inputset), 
                                    params=self.output_norm_params,
@@ -277,7 +277,7 @@ class NN():
             Outputset = [np.squeeze(result) for result in Outputset]
             #Inputset = [np.squeeze(result) for result in Inputset]
             Timeset = [np.squeeze(result) for result in Timeset]
-        
+
         return results, Outputset, Inputset, Timeset #, seg_ind_list
     
     # Contains the method above
